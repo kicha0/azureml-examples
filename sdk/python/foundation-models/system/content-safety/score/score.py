@@ -1,9 +1,11 @@
+import asyncio
 import json
 import logging
 import numpy as np
 import os
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from inference_schema.parameter_types.abstract_parameter_type import AbstractParameterType
 from inference_schema.parameter_types.numpy_parameter_type import NumpyParameterType
 from inference_schema.parameter_types.standard_py_parameter_type import StandardPythonParameterType
@@ -14,6 +16,8 @@ from mlflow.pyfunc.scoring_server import _get_jsonable_obj
 from azure.ai.contentsafety import ContentSafetyClient
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.contentsafety.models import AnalyzeTextOptions
+from aiolimiter import AsyncLimiter
+
 
 _logger = logging.getLogger(__name__)
 
@@ -27,6 +31,56 @@ try:
 except ImportError as exception:
     _logger.warning('Unable to import pandas')
 
+class AsyncRateLimitedOpsUtils:
+    # 1000 requests / 10 seconds. Limiting to 800 request per 10 secods
+    # limiting to 1000 concurrent requests
+    def __init__(self, ops_count=800, ops_seconds=10, concurrent_ops=1000, thread_max_workers=1000):
+        self.limiter = AsyncLimiter(ops_count, ops_seconds)
+        self.semaphore = asyncio.Semaphore(value=concurrent_ops)
+        # need thread pool executor for sync function
+        self.executor = ThreadPoolExecutor(max_workers=thread_max_workers)
+
+    def get_limiter(self):
+        return self.limiter
+
+    def get_semaphore(self):
+        return self.semaphore
+
+    def get_executor(self):
+        return self.executor
+
+async_rate_limiter = AsyncRateLimitedOpsUtils()
+
+class CsChunkingUtils:
+    def __init__(self, chunking_n=1000, delimiter="."):
+        self.delimiter = delimiter
+        self.chunking_n = chunking_n
+    
+    def chunkstring(self, string, length):
+        return (string[0+i:length+i] for i in range(0, len(string), length))
+
+    def split_by(self, input):
+        max_n = self.chunking_n
+        split = [e+token for e in input.split(token) if e]
+        ret = []
+        buffer = ""
+
+        for i in split:
+            # if a single element > max_n, chunk by max_n
+            if len(i) > max_n:
+                ret.append(buffer)
+                ret.extend(list(chunkstring(i, max_n)))
+                buffer = ""
+                continue
+            if len(buffer) + len(i) <= max_n:
+                buffer = buffer + i
+            else:
+                ret.append(buffer)
+                buffer = i
+                
+        if len(buffer) > 0:
+            ret.append(buffer)
+        return ret
 
 class NoSampleParameterType(AbstractParameterType):
     def __init__(self):
@@ -192,24 +246,21 @@ def init():
     _logger.info("init")
 
 
-def analyze_text(text):
-    endpoint = os.environ.get('CONTENT_SAFETY_ENDPOINT')
-    key = os.environ.get('CONTENT_SAFETY_KEY')
+async def async_analyze_text_task(client, request):
+    loop = asyncio.get_event_loop()
+    executor = async_rate_limiter.get_executor()
+    sem = async_rate_limiter.get_semaphore()
+    await sem.acquire()
+    async with async_rate_limiter.get_limiter():
+        response = await loop.run_in_executor(executor, client.analyze_text, request)
+        sem.release()
+        severity = analyze_response(response)
+        if severity > 2:
+            raise ValueError("Expect severity less than 2")
+        return severity
 
-
-    # Create an Content Safety client
-    client = ContentSafetyClient(endpoint, AzureKeyCredential(key))
-
-    # Build request
-    request = AnalyzeTextOptions(text = text)
-
-    # Analyze text
-    try:
-        response = client.analyze_text(request)
-    except Exception as e:
-        raise e
-    
-    severity = 0
+def analyze_response(analyze_text_response):
+   severity = 0
 
     if response.hate_result is not None:
         _logger.info("Hate severity: {}".format(response.hate_result.severity))
@@ -226,7 +277,31 @@ def analyze_text(text):
     
     return severity
 
+def analyze_text(text):
+    endpoint = os.environ.get('CONTENT_SAFETY_ENDPOINT')
+    key = os.environ.get('CONTENT_SAFETY_KEY')
 
+    # Create an Content Safety client
+    client = ContentSafetyClient(endpoint, AzureKeyCredential(key))
+
+    # Chunk text
+    chunking_utils = CsChunkingUtils(chunking_n=1000, delimiter=".")
+    split_text = chunking_utils.split_by()
+
+    tasks = []
+    for i in split_text:
+        request = AnalyzeTextOptions(text = i)
+        tasks.append(async_analyze_text_task(client, request))
+
+    done, pending = asyncio.get_event_loop().run_until_complete(
+        asyncio.wait(tasks, timeout=60)
+    )
+
+    if len(pending) > 0:
+        # not all task finished, assume failed
+        return 2
+    
+    return max([d.result() for d in done])
 
 @input_schema("input_data", input_param)
 @output_schema(output_param)
