@@ -358,4 +358,4 @@ def run(input_data):
             return_result.append(d)
 
 
-    return _get_jsonable_obj(return_result, pandas_orient="records")
+    return return_result
