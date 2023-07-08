@@ -61,7 +61,7 @@ class CsChunkingUtils:
 
     def split_by(self, input):
         max_n = self.chunking_n
-        split = [e+token for e in input.split(token) if e]
+        split = [e+self.delimiter for e in input.split(self.delimiter) if e]
         ret = []
         buffer = ""
 
@@ -69,7 +69,7 @@ class CsChunkingUtils:
             # if a single element > max_n, chunk by max_n
             if len(i) > max_n:
                 ret.append(buffer)
-                ret.extend(list(chunkstring(i, max_n)))
+                ret.extend(list(self.chunkstring(i, max_n)))
                 buffer = ""
                 continue
             if len(buffer) + len(i) <= max_n:
@@ -255,12 +255,10 @@ async def async_analyze_text_task(client, request):
         response = await loop.run_in_executor(executor, client.analyze_text, request)
         sem.release()
         severity = analyze_response(response)
-        if severity > 2:
-            raise ValueError("Expect severity less than 2")
         return severity
 
-def analyze_response(analyze_text_response):
-   severity = 0
+def analyze_response(response):
+    severity = 0
 
     if response.hate_result is not None:
         _logger.info("Hate severity: {}".format(response.hate_result.severity))
@@ -274,7 +272,7 @@ def analyze_response(analyze_text_response):
     if response.violence_result is not None:
         _logger.info("Violence severity: {}".format(response.violence_result.severity))
         severity = max(severity, response.violence_result.severity)
-    
+
     return severity
 
 def analyze_text(text):
