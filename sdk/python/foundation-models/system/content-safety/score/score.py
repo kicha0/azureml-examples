@@ -284,7 +284,7 @@ def analyze_text(text):
 
     # Chunk text
     chunking_utils = CsChunkingUtils(chunking_n=1000, delimiter=".")
-    split_text = chunking_utils.split_by()
+    split_text = chunking_utils.split_by(text)
 
     tasks = []
     for i in split_text:
