@@ -333,10 +333,31 @@ def run(input_data):
         # otherwise, assume input is a named tensor, and deserialize into a dict[str, numpy.ndarray]
         input = {input_name: np.asarray(input_value) for input_name, input_value in input_data.items()}
 
+    # input json string should look something like this: 
+    """{
+        "input_data": {
+            "any": {
+                "a_column": "Hi this is example one",
+                "b_column": "Hi this is example two"
+            }
+        }
+    }"""
+
+    # note, each additional separate sample would take about 15s to process. Given timeout of 90s, samples > 5 have high chance of timeout.
     result = model.predict(input)
-    severity = max([analyze_text(row[0]) for _, row in result.iterrows()])
-    if severity > 2:
-        return ""
+    jsonable_result = _get_jsonable_obj(result, pandas_orient="records")
+    # jsnoable result is a list that looks like this:
+    """
+    [{0: 'first result'}, {0: 'second result'}]
+    """
+
+    return_result = []
+    for d in jsonable_result:
+        result = d[0]
+        if analyze_text(result) > 2:
+            return_result.append({0: ''})
+        else:
+            return_result.append(d)
 
 
-    return _get_jsonable_obj(result, pandas_orient="records")
+    return _get_jsonable_obj(return_result, pandas_orient="records")
